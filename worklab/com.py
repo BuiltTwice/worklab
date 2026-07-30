@@ -869,12 +869,8 @@ def load_movesense(root_dir, right=None, frame=None, left=None):
         gyro.rename(columns={'x': 'gyroscope_y', 'y': 'gyroscope_x',
                              'z': 'gyroscope_z'}, inplace=True)
 
-        acc_time = pd.to_datetime(acc['timestamp'], unit='ms')
-        acc_time -= acc_time[0]
-        acc_time = acc_time.dt.total_seconds()
-        gyro_time = pd.to_datetime(gyro['timestamp'], unit='ms')
-        gyro_time -= gyro_time[0]
-        gyro_time = gyro_time.dt.total_seconds()
+        acc_time = (acc['timestamp'] - acc['timestamp'].iloc[0]) / 1000
+        gyro_time = (gyro['timestamp'] - gyro['timestamp'].iloc[0]) / 1000
 
         sfreq_acc = int(1 / acc_time.diff().mean())
         sfreq_gyro = int(1 / gyro_time.diff().mean())
@@ -888,9 +884,15 @@ def load_movesense(root_dir, right=None, frame=None, left=None):
 
         sessiondata[sensor_name] = gyro.merge(acc, on='timestamp',
                                               how='inner')
-        sessiondata[sensor_name]['time'] = pd.to_datetime(sessiondata[sensor_name]['timestamp'], unit='ms')
-        sessiondata[sensor_name]['time'] -= sessiondata[sensor_name]['time'][0]
-        sessiondata[sensor_name]['time'] = sessiondata[sensor_name]['time'].dt.total_seconds()
+
+    if not sessiondata:
+        raise ValueError("No MoveSense sensor files matched the supplied device identities")
+
+    # Use one origin for the complete recording. Resetting every device to its
+    # own first sample silently discards real start offsets between sensors.
+    recording_start = min(data['timestamp'].iloc[0] for data in sessiondata.values())
+    for data in sessiondata.values():
+        data['time'] = (data['timestamp'] - recording_start) / 1000
 
     sfreq = sfreq[min(sfreq, key=sfreq.get)]
 
