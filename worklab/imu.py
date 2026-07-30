@@ -51,7 +51,12 @@ def resample_imu(sessiondata, sfreq=400.0):
     for device in sessiondata:
         if device == "quaternion":
             sessiondata[device] = pd_interp(sessiondata[device], "time", new_time)
-            sessiondata[device] *= 1 / np.linalg.norm(sessiondata[device], axis=0)
+            quaternion_columns = [column for column in sessiondata[device].columns if column != "time"]
+            quaternion_values = sessiondata[device][quaternion_columns].to_numpy(dtype=float)
+            quaternion_norms = np.linalg.norm(quaternion_values, axis=1)
+            if np.any(~np.isfinite(quaternion_norms)) or np.any(quaternion_norms <= 0):
+                raise ValueError("Quaternion samples must have a finite, non-zero norm")
+            sessiondata[device].loc[:, quaternion_columns] = quaternion_values / quaternion_norms[:, np.newaxis]
         elif device == "matrix":
             warn("Rotation matrix cannot be resampled. This dataframe has been removed")
         else:
@@ -97,7 +102,7 @@ def fit_imu_sync(anchors):
     if np.ptp(pairs[:, 0]) <= 0:
         raise ValueError("Synchronization anchors must span more than one source time")
 
-    used = pairs
+    used = _robust_clock_inliers(pairs)
     for _ in range(3):
         scale, offset = _least_squares_clock_fit(used)
         residuals = used[:, 1] - (scale * used[:, 0] + offset)
@@ -122,6 +127,39 @@ def fit_imu_sync(anchors):
             for source, reference in used
         ],
     }
+
+
+def _robust_clock_inliers(pairs):
+    """Select a clock-model consensus before least-squares refinement."""
+    if len(pairs) == 2:
+        return pairs
+
+    candidates = []
+    for first in range(len(pairs) - 1):
+        for second in range(first + 1, len(pairs)):
+            source_delta = pairs[second, 0] - pairs[first, 0]
+            if source_delta == 0:
+                continue
+            scale = (pairs[second, 1] - pairs[first, 1]) / source_delta
+            if not np.isfinite(scale) or scale <= 0:
+                continue
+            offset = pairs[first, 1] - scale * pairs[first, 0]
+            residuals = pairs[:, 1] - (scale * pairs[:, 0] + offset)
+            median_residual = np.median(residuals)
+            median_deviation = np.median(np.abs(residuals - median_residual))
+            candidates.append((median_deviation, abs(scale - 1.0), scale, offset))
+
+    if not candidates:
+        raise ValueError("Synchronization anchors imply an invalid clock scale")
+
+    _, _, scale, offset = min(candidates, key=lambda candidate: candidate[:2])
+    residuals = pairs[:, 1] - (scale * pairs[:, 0] + offset)
+    median_residual = np.median(residuals)
+    deviation = np.abs(residuals - median_residual)
+    mad = np.median(deviation)
+    threshold = max(0.02, 3 * 1.4826 * mad)
+    keep = deviation <= threshold
+    return pairs[keep] if keep.sum() >= 2 else pairs
 
 
 def synchronize_imu(sessiondata, reference="frame", devices=None, signal_column="gyroscope_x",
